@@ -25,7 +25,9 @@ func (s *JSONScanner) Next() bool {
 	if !s.inArray {
 		tok, err := s.dec.Token()
 		if err != nil {
-			s.err = err
+			if err != io.EOF {
+				s.err = err
+			}
 			return false
 		}
 		if delim, ok := tok.(json.Delim); ok && delim == '[' {

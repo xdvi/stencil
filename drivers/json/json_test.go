@@ -51,7 +51,7 @@ func TestJSON_Driver_InvalidPayloadReportsStreamError(t *testing.T) {
 
 	var events []stencil.RowError
 	for item, rowErr := range stencil.Scan[UserJSON](context.Background(), scanner, s) {
-		if item != nil {
+		if rowErr.Code == "" {
 			t.Errorf("expected zero valid records, got %+v", item)
 		}
 		events = append(events, rowErr)
@@ -81,8 +81,8 @@ func TestJSON_Driver_ErrorInNonLastKeyKeepsStreamPosition(t *testing.T) {
 	var events []stencil.RowError
 	var items []UserJSON
 	for item, rowErr := range stencil.Scan[UserJSON](context.Background(), scanner, s) {
-		if item != nil {
-			items = append(items, *item)
+		if rowErr.Code == "" {
+			items = append(items, item)
 		}
 		events = append(events, rowErr)
 	}
@@ -106,5 +106,26 @@ func TestJSON_Driver_ErrorInNonLastKeyKeepsStreamPosition(t *testing.T) {
 	}
 	if items[0].Username != "c" || items[0].Credits != 200 {
 		t.Errorf("unexpected row 2: %+v", items[0])
+	}
+}
+
+func TestJSON_Driver_EmptyInputIsCleanEOF(t *testing.T) {
+	s, err := stencil.Compile[UserJSON]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := json.NewScanner(strings.NewReader(""))
+
+	var events []stencil.RowError
+	for _, rowErr := range stencil.Scan[UserJSON](context.Background(), scanner, s) {
+		events = append(events, rowErr)
+	}
+
+	if scanner.Err() != nil {
+		t.Fatalf("expected clean EOF, got %v", scanner.Err())
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no events for empty input, got %+v", events)
 	}
 }
