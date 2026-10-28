@@ -1,4 +1,4 @@
-package schema
+package stencil
 
 import (
 	"bytes"
@@ -9,10 +9,10 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/xdvi/stencil"
 	"github.com/xdvi/stencil/scalars"
 )
 
+// Schema represents a pre-compiled mapping plan for struct type T.
 type Schema[T any] struct {
 	colBindings []FieldBinding
 	keyBindings []FieldBinding
@@ -20,6 +20,7 @@ type Schema[T any] struct {
 	required    []FieldBinding
 }
 
+// Compile inspects struct tags once at startup and compiles memory offsets and typed injectors.
 func Compile[T any]() (*Schema[T], error) {
 	var zero T
 	t := reflect.TypeOf(zero)
@@ -98,9 +99,9 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 
 	switch {
 	case field.Type == reflect.TypeOf(""):
-		injector = func(base unsafe.Pointer, row int, val []byte, errOut *stencil.RowError) bool {
+		injector = func(base unsafe.Pointer, row int, val []byte, errOut *RowError) bool {
 			if len(val) == 0 && required {
-				*errOut = stencil.RowError{Row: row, Col: name, Code: "required_field", Message: "Field is required"}
+				*errOut = RowError{Row: row, Col: name, Code: "required_field", Message: "Field is required"}
 				return false
 			}
 			ptr := (*string)(unsafe.Add(base, offset))
@@ -112,17 +113,17 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 			return append(dst, val...)
 		}
 	case field.Type == reflect.TypeOf(int64(0)) && isCurrency:
-		injector = func(base unsafe.Pointer, row int, val []byte, errOut *stencil.RowError) bool {
+		injector = func(base unsafe.Pointer, row int, val []byte, errOut *RowError) bool {
 			if len(val) == 0 {
 				if required {
-					*errOut = stencil.RowError{Row: row, Col: name, Code: "required_field", Message: "Field is required"}
+					*errOut = RowError{Row: row, Col: name, Code: "required_field", Message: "Field is required"}
 					return false
 				}
 				return true
 			}
 			cents, err := scalars.ParseCurrencyCents(val)
 			if err != nil {
-				*errOut = stencil.RowError{Row: row, Col: name, Code: "invalid_currency", Expected: "ISO 4217 Currency", Actual: string(val), Message: err.Error()}
+				*errOut = RowError{Row: row, Col: name, Code: "invalid_currency", Expected: "ISO 4217 Currency", Actual: string(val), Message: err.Error()}
 				return false
 			}
 			*(*int64)(unsafe.Add(base, offset)) = cents
@@ -133,17 +134,17 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 			return scalars.AppendCurrencyCents(dst, cents)
 		}
 	case field.Type == reflect.TypeOf(time.Time{}) && isISO8601:
-		injector = func(base unsafe.Pointer, row int, val []byte, errOut *stencil.RowError) bool {
+		injector = func(base unsafe.Pointer, row int, val []byte, errOut *RowError) bool {
 			if len(val) == 0 {
 				if required {
-					*errOut = stencil.RowError{Row: row, Col: name, Code: "required_field", Message: "Field is required"}
+					*errOut = RowError{Row: row, Col: name, Code: "required_field", Message: "Field is required"}
 					return false
 				}
 				return true
 			}
 			ts, err := scalars.ParseISO8601(val)
 			if err != nil {
-				*errOut = stencil.RowError{Row: row, Col: name, Code: "invalid_iso8601", Expected: "YYYY-MM-DDTHH:MM:SSZ", Actual: string(val), Message: err.Error()}
+				*errOut = RowError{Row: row, Col: name, Code: "invalid_iso8601", Expected: "YYYY-MM-DDTHH:MM:SSZ", Actual: string(val), Message: err.Error()}
 				return false
 			}
 			*(*time.Time)(unsafe.Add(base, offset)) = ts
@@ -168,11 +169,13 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 	}, nil
 }
 
+// ResetAndBind zeroes out the target struct to prevent data bleed across iterations.
 func (s *Schema[T]) ResetAndBind(target *T) {
 	*target = s.zero
 }
 
-func (s *Schema[T]) SetField(target *T, row int, col int, key []byte, val []byte, errOut *stencil.RowError) bool {
+// SetField injects val into target using either positional col index or key name.
+func (s *Schema[T]) SetField(target *T, row int, col int, key []byte, val []byte, errOut *RowError) bool {
 	base := unsafe.Pointer(target)
 	if col >= 0 && col < len(s.colBindings) {
 		b := &s.colBindings[col]
@@ -191,16 +194,17 @@ func (s *Schema[T]) SetField(target *T, row int, col int, key []byte, val []byte
 	return true
 }
 
-func (s *Schema[T]) ValidateRequired(target *T, row int, errsOut []stencil.RowError) []stencil.RowError {
+// ValidateRequired verifies that all required fields have non-zero values.
+func (s *Schema[T]) ValidateRequired(target *T, row int, errsOut []RowError) []RowError {
 	base := unsafe.Pointer(target)
 	errsOut = errsOut[:0]
-	var rowErr stencil.RowError
+	var rowErr RowError
 
 	for i := range s.required {
 		req := &s.required[i]
 		switch {
 		case *(*string)(unsafe.Add(base, req.Offset)) == "":
-			rowErr = stencil.RowError{Row: row, Col: req.KeyName, Code: "required_field", Message: "Field is required"}
+			rowErr = RowError{Row: row, Col: req.KeyName, Code: "required_field", Message: "Field is required"}
 			errsOut = append(errsOut, rowErr)
 		}
 	}

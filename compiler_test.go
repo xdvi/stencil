@@ -1,11 +1,10 @@
-package schema_test
+package stencil_test
 
 import (
 	"testing"
 	"time"
 
 	"github.com/xdvi/stencil"
-	"github.com/xdvi/stencil/schema"
 )
 
 type UnifiedDoc struct {
@@ -16,12 +15,12 @@ type UnifiedDoc struct {
 }
 
 func TestSchema_BindPositional_And_Named(t *testing.T) {
-	s, err := schema.Compile[UnifiedDoc]()
+	s, err := stencil.Compile[UnifiedDoc]()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// 1. Test Positional (CSV/XLSX mode)
+	// 1. Positional binding (CSV/XLSX mode)
 	var doc UnifiedDoc
 	s.ResetAndBind(&doc)
 	var rowErr stencil.RowError
@@ -35,14 +34,14 @@ func TestSchema_BindPositional_And_Named(t *testing.T) {
 		t.Fatalf("positional bind failed: %+v", doc)
 	}
 
-	// 2. Test Data Bleed (Reset on row 2)
+	// 2. Data bleed prevention across row iterations
 	s.ResetAndBind(&doc)
 	s.SetField(&doc, 2, 0, nil, []byte("DOC-2"), &rowErr)
 	if doc.Note != "" {
 		t.Fatalf("data bleed detected: note was not reset: %q", doc.Note)
 	}
 
-	// 3. Test Named (JSON/XML mode)
+	// 3. Named key binding (JSON/XML mode)
 	s.ResetAndBind(&doc)
 	s.SetField(&doc, 3, -1, []byte("id"), []byte("DOC-JSON"), &rowErr)
 	s.SetField(&doc, 3, -1, []byte("amount"), []byte("99.00"), &rowErr)
@@ -52,7 +51,7 @@ func TestSchema_BindPositional_And_Named(t *testing.T) {
 }
 
 func BenchmarkSetField_ZeroAlloc(b *testing.B) {
-	s, err := schema.Compile[UnifiedDoc]()
+	s, err := stencil.Compile[UnifiedDoc]()
 	if err != nil {
 		b.Fatal(err)
 	}
