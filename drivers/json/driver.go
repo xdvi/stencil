@@ -25,6 +25,7 @@ func (s *JSONScanner) Next() bool {
 	if !s.inArray {
 		tok, err := s.dec.Token()
 		if err != nil {
+			s.err = err
 			return false
 		}
 		if delim, ok := tok.(json.Delim); ok && delim == '[' {
@@ -33,7 +34,9 @@ func (s *JSONScanner) Next() bool {
 	}
 
 	if s.inArray && !s.dec.More() {
-		_, _ = s.dec.Token() // consume closing ']'
+		if _, err := s.dec.Token(); err != nil && err != io.EOF { // consume closing ']'
+			s.err = err
+		}
 		return false
 	}
 	return s.dec.More()
@@ -43,34 +46,51 @@ func (s *JSONScanner) Next() bool {
 func (s *JSONScanner) ScanFields(yield stencil.FieldVisitor) error {
 	tok, err := s.dec.Token()
 	if err != nil {
+		s.err = err
 		return err
 	}
 	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
-		return fmt.Errorf("expected '{' at start of object, got %v", tok)
+		err = fmt.Errorf("expected '{' at start of object, got %v", tok)
+		s.err = err
+		return err
 	}
 
+	stopped := false
 	for s.dec.More() {
 		keyTok, err := s.dec.Token()
 		if err != nil {
+			s.err = err
 			return err
 		}
 		key, ok := keyTok.(string)
 		if !ok {
-			return fmt.Errorf("expected string key, got %v", keyTok)
+			err = fmt.Errorf("expected string key, got %v", keyTok)
+			s.err = err
+			return err
 		}
 
 		var raw json.RawMessage
 		if err := s.dec.Decode(&raw); err != nil {
+			s.err = err
 			return err
+		}
+
+		// Drain the rest of the object without yielding so the decoder stays
+		// positioned at the next row after a field-level failure.
+		if stopped {
+			continue
 		}
 
 		cleanVal := cleanJSONRaw(raw)
 		if !yield(-1, []byte(key), cleanVal) {
-			break
+			stopped = true
 		}
 	}
 
 	_, err = s.dec.Token() // consume closing '}'
+	if err != nil {
+		s.err = err
+	}
 	return err
 }
 
