@@ -16,6 +16,7 @@ import (
 type Schema[T any] struct {
 	colBindings []FieldBinding
 	keyBindings []FieldBinding
+	all         []FieldBinding
 	zero        T
 	required    []FieldBinding
 }
@@ -30,6 +31,7 @@ func Compile[T any]() (*Schema[T], error) {
 
 	var cols []FieldBinding
 	var keys []FieldBinding
+	var all []FieldBinding
 	var reqs []FieldBinding
 
 	for i := 0; i < t.NumField(); i++ {
@@ -43,6 +45,8 @@ func Compile[T any]() (*Schema[T], error) {
 		if err != nil {
 			return nil, err
 		}
+
+		all = append(all, binding)
 
 		if binding.ColIndex >= 0 {
 			for len(cols) <= binding.ColIndex {
@@ -61,6 +65,7 @@ func Compile[T any]() (*Schema[T], error) {
 	return &Schema[T]{
 		colBindings: cols,
 		keyBindings: keys,
+		all:         all,
 		zero:        zero,
 		required:    reqs,
 	}, nil
@@ -96,14 +101,12 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 	name := field.Name
 	var injector fieldInjector
 	var extractor fieldExtractor
+	var isZero func(base unsafe.Pointer) bool
+	var detach func(base unsafe.Pointer)
 
 	switch {
 	case field.Type == reflect.TypeOf(""):
 		injector = func(base unsafe.Pointer, row int, val []byte, errOut *RowError) bool {
-			if len(val) == 0 && required {
-				*errOut = RowError{Row: row, Col: name, Code: "required_field", Message: "Field is required"}
-				return false
-			}
 			ptr := (*string)(unsafe.Add(base, offset))
 			*ptr = unsafe.String(unsafe.SliceData(val), len(val))
 			return true
@@ -112,13 +115,16 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 			val := *(*string)(unsafe.Add(base, offset))
 			return append(dst, val...)
 		}
+		isZero = func(base unsafe.Pointer) bool {
+			return *(*string)(unsafe.Add(base, offset)) == ""
+		}
+		detach = func(base unsafe.Pointer) {
+			ptr := (*string)(unsafe.Add(base, offset))
+			*ptr = strings.Clone(*ptr)
+		}
 	case field.Type == reflect.TypeOf(int64(0)) && isCurrency:
 		injector = func(base unsafe.Pointer, row int, val []byte, errOut *RowError) bool {
 			if len(val) == 0 {
-				if required {
-					*errOut = RowError{Row: row, Col: name, Code: "required_field", Message: "Field is required"}
-					return false
-				}
 				return true
 			}
 			cents, err := scalars.ParseCurrencyCents(val)
@@ -133,13 +139,13 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 			cents := *(*int64)(unsafe.Add(base, offset))
 			return scalars.AppendCurrencyCents(dst, cents)
 		}
+		isZero = func(base unsafe.Pointer) bool {
+			return *(*int64)(unsafe.Add(base, offset)) == 0
+		}
+		detach = func(base unsafe.Pointer) {}
 	case field.Type == reflect.TypeOf(time.Time{}) && isISO8601:
 		injector = func(base unsafe.Pointer, row int, val []byte, errOut *RowError) bool {
 			if len(val) == 0 {
-				if required {
-					*errOut = RowError{Row: row, Col: name, Code: "required_field", Message: "Field is required"}
-					return false
-				}
 				return true
 			}
 			ts, err := scalars.ParseISO8601(val)
@@ -154,6 +160,10 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 			ts := *(*time.Time)(unsafe.Add(base, offset))
 			return scalars.AppendISO8601(dst, ts)
 		}
+		isZero = func(base unsafe.Pointer) bool {
+			return (*(*time.Time)(unsafe.Add(base, offset))).IsZero()
+		}
+		detach = func(base unsafe.Pointer) {}
 	default:
 		return FieldBinding{}, fmt.Errorf("stencil: unsupported type %s for field %s", field.Type, field.Name)
 	}
@@ -163,9 +173,12 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 		KeyName:  keyName,
 		KeyBytes: []byte(keyName),
 		Required: required,
+		Name:     name,
 		Offset:   offset,
 		Inject:   injector,
 		Extract:  extractor,
+		IsZero:   isZero,
+		Detach:   detach,
 	}, nil
 }
 
@@ -198,15 +211,27 @@ func (s *Schema[T]) SetField(target *T, row int, col int, key []byte, val []byte
 func (s *Schema[T]) ValidateRequired(target *T, row int, errsOut []RowError) []RowError {
 	base := unsafe.Pointer(target)
 	errsOut = errsOut[:0]
-	var rowErr RowError
 
 	for i := range s.required {
 		req := &s.required[i]
-		switch {
-		case *(*string)(unsafe.Add(base, req.Offset)) == "":
-			rowErr = RowError{Row: row, Col: req.KeyName, Code: "required_field", Message: "Field is required"}
-			errsOut = append(errsOut, rowErr)
+		if req.IsZero(base) {
+			errsOut = append(errsOut, RowError{
+				Row:     row,
+				Col:     requiredLabel(req),
+				Code:    "required_field",
+				Message: "Field is required",
+			})
 		}
 	}
 	return errsOut
+}
+
+func requiredLabel(b *FieldBinding) string {
+	if b.KeyName != "" {
+		return b.KeyName
+	}
+	if b.ColIndex >= 0 {
+		return "col:" + strconv.Itoa(b.ColIndex)
+	}
+	return b.Name
 }
