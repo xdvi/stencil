@@ -2,6 +2,7 @@ package stencil
 
 import (
 	"context"
+	"io"
 	"iter"
 	"unsafe"
 )
@@ -11,6 +12,10 @@ import (
 // Scan is the zero-allocation path: the yielded record and any strings it contains
 // are only valid until the next iteration. Retain a record only after copying its
 // string fields; use ScanCopy to have stencil perform that copy.
+//
+// Stencil takes ownership of scanner and closes it when iteration ends, including
+// on early break, field error, stream error, and context cancellation. The caller
+// must not close the scanner separately.
 func Scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T]) iter.Seq2[T, RowError] {
 	return scan(ctx, scanner, s, false)
 }
@@ -20,6 +25,10 @@ func Scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T]) iter.Seq
 // String fields are cloned before each yield, so the yielded record is safe to
 // retain after the loop. time.Time values point only to immutable location data
 // and need no additional copy. Use Scan when records are consumed in place.
+//
+// Stencil takes ownership of scanner and closes it when iteration ends, including
+// on early break, field error, stream error, and context cancellation. The caller
+// must not close the scanner separately.
 func ScanCopy[T any](ctx context.Context, scanner RowScanner, s *Schema[T]) iter.Seq2[T, RowError] {
 	return scan(ctx, scanner, s, true)
 }
@@ -32,21 +41,32 @@ func scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T], copyRows
 		var rowErr RowError
 		errBuf := make([]RowError, 0, 8)
 
-		for scanner.Next() {
+		if closer, ok := scanner.(io.Closer); ok {
+			defer closer.Close()
+		}
+
+		var hasError bool
+		visit := func(col int, key []byte, val []byte) bool {
+			if !s.SetField(&item, rowNum, col, key, val, &rowErr) {
+				hasError = true
+				return false
+			}
+			return true
+		}
+
+		for {
 			if err := ctx.Err(); err != nil {
+				yield(zero, RowError{Row: rowNum, Code: "canceled", Message: err.Error()})
 				return
+			}
+			if !scanner.Next() {
+				break
 			}
 			rowNum++
 			s.ResetAndBind(&item)
 
-			hasError := false
-			err := scanner.ScanFields(func(col int, key []byte, val []byte) bool {
-				if !s.SetField(&item, rowNum, col, key, val, &rowErr) {
-					hasError = true
-					return false
-				}
-				return true
-			})
+			hasError = false
+			err := scanner.ScanFields(visit)
 
 			if err != nil {
 				yield(zero, RowError{Row: rowNum, Code: "scanner_error", Message: err.Error()})

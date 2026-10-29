@@ -2,6 +2,7 @@ package stencil_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +138,291 @@ func TestScanCopy_RetainsRows(t *testing.T) {
 
 type intRow struct {
 	Amount int64 `stencil:"col:0,currency"`
+}
+
+type contextRow struct {
+	Name string `stencil:"col:0"`
+}
+
+type trackingScanner struct {
+	rows       [][]string
+	idx        int
+	nextCalls  int
+	closeCalls int
+	onFields   func()
+	scanErr    error
+	streamErr  error
+}
+
+func (s *trackingScanner) Next() bool {
+	s.nextCalls++
+	if s.idx >= len(s.rows) {
+		return false
+	}
+	s.idx++
+	return true
+}
+
+func (s *trackingScanner) ScanFields(yield stencil.FieldVisitor) error {
+	if s.onFields != nil {
+		s.onFields()
+	}
+	if s.scanErr != nil {
+		return s.scanErr
+	}
+	for col, val := range s.rows[s.idx-1] {
+		if !yield(col, nil, []byte(val)) {
+			break
+		}
+	}
+	return nil
+}
+
+func (s *trackingScanner) Err() error { return s.streamErr }
+
+func (s *trackingScanner) Close() error {
+	s.closeCalls++
+	return nil
+}
+
+func TestScan_PreCanceledContext(t *testing.T) {
+	s, err := stencil.Compile[contextRow]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := &trackingScanner{rows: [][]string{{"Alice"}, {"Bob"}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var rows, events int
+	var got []stencil.RowError
+	for _, rowErr := range stencil.Scan[contextRow](ctx, scanner, s) {
+		if rowErr.Code == "" {
+			rows++
+			continue
+		}
+		events++
+		got = append(got, rowErr)
+	}
+
+	if rows != 0 {
+		t.Fatalf("expected 0 valid rows, got %d", rows)
+	}
+	if events != 1 {
+		t.Fatalf("expected exactly 1 canceled event, got %d: %+v", events, got)
+	}
+	if got[0].Code != "canceled" {
+		t.Errorf("expected code canceled, got %q", got[0].Code)
+	}
+	if got[0].Row != 0 {
+		t.Errorf("expected row 0, got %d", got[0].Row)
+	}
+	if got[0].Message != context.Canceled.Error() {
+		t.Errorf("expected message %q, got %q", context.Canceled.Error(), got[0].Message)
+	}
+	if scanner.nextCalls != 0 {
+		t.Errorf("expected 0 Next calls, got %d", scanner.nextCalls)
+	}
+	if scanner.closeCalls != 1 {
+		t.Errorf("expected 1 Close call, got %d", scanner.closeCalls)
+	}
+}
+
+func TestScan_CancelAfterFirstRow(t *testing.T) {
+	s, err := stencil.Compile[contextRow]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	scanner := &trackingScanner{rows: [][]string{{"Alice"}, {"Bob"}}}
+	scanner.onFields = func() {
+		if scanner.idx == 1 {
+			cancel()
+		}
+	}
+
+	var rows, events int
+	var got []stencil.RowError
+	for row, rowErr := range stencil.Scan[contextRow](ctx, scanner, s) {
+		if rowErr.Code == "" {
+			rows++
+			if row.Name != "Alice" {
+				t.Errorf("expected first row Alice, got %+v", row)
+			}
+			continue
+		}
+		events++
+		got = append(got, rowErr)
+	}
+
+	if rows != 1 {
+		t.Fatalf("expected 1 valid row, got %d", rows)
+	}
+	if events != 1 {
+		t.Fatalf("expected exactly 1 canceled event, got %d: %+v", events, got)
+	}
+	if got[0].Code != "canceled" {
+		t.Errorf("expected code canceled, got %q", got[0].Code)
+	}
+	if got[0].Row != 1 {
+		t.Errorf("expected row 1, got %d", got[0].Row)
+	}
+	if scanner.nextCalls != 1 {
+		t.Errorf("expected 1 Next call, got %d", scanner.nextCalls)
+	}
+	if scanner.closeCalls != 1 {
+		t.Errorf("expected 1 Close call, got %d", scanner.closeCalls)
+	}
+}
+
+func TestScan_NormalExhaustionCloses(t *testing.T) {
+	s, err := stencil.Compile[contextRow]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := &trackingScanner{rows: [][]string{{"Alice"}, {"Bob"}}}
+	var rows int
+	for row, rowErr := range stencil.Scan[contextRow](context.Background(), scanner, s) {
+		if rowErr.Code != "" {
+			t.Fatalf("unexpected row error: %+v", rowErr)
+		}
+		rows++
+		if rows == 2 && row.Name != "Bob" {
+			t.Errorf("expected second row Bob, got %+v", row)
+		}
+	}
+
+	if rows != 2 {
+		t.Fatalf("expected 2 valid rows, got %d", rows)
+	}
+	if scanner.closeCalls != 1 {
+		t.Errorf("expected 1 Close call, got %d", scanner.closeCalls)
+	}
+}
+
+func TestScan_EarlyBreakCloses(t *testing.T) {
+	s, err := stencil.Compile[contextRow]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := &trackingScanner{rows: [][]string{{"Alice"}, {"Bob"}}}
+	var rows int
+	for _, rowErr := range stencil.Scan[contextRow](context.Background(), scanner, s) {
+		if rowErr.Code != "" {
+			t.Fatalf("unexpected row error: %+v", rowErr)
+		}
+		rows++
+		break
+	}
+
+	if rows != 1 {
+		t.Fatalf("expected 1 valid row, got %d", rows)
+	}
+	if scanner.closeCalls != 1 {
+		t.Errorf("expected 1 Close call, got %d", scanner.closeCalls)
+	}
+}
+
+func TestScan_ScannerWithoutClose(t *testing.T) {
+	s, err := stencil.Compile[contextRow]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := csv.NewScanner(strings.NewReader("Alice\nBob\n"))
+	var rows int
+	for _, rowErr := range stencil.Scan[contextRow](context.Background(), scanner, s) {
+		if rowErr.Code != "" {
+			t.Fatalf("unexpected row error: %+v", rowErr)
+		}
+		rows++
+	}
+
+	if rows != 2 {
+		t.Fatalf("expected 2 valid rows, got %d", rows)
+	}
+}
+
+func TestScan_FieldErrorEarlyStopCloses(t *testing.T) {
+	s, err := stencil.Compile[intRow]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := &trackingScanner{rows: [][]string{{"not-a-currency"}, {"$2.00"}}}
+	var events int
+	for _, rowErr := range stencil.Scan[intRow](context.Background(), scanner, s) {
+		if rowErr.Code == "" {
+			t.Fatalf("expected field error, got valid row")
+		}
+		events++
+		break
+	}
+
+	if events != 1 {
+		t.Fatalf("expected 1 field error, got %d", events)
+	}
+	if scanner.closeCalls != 1 {
+		t.Errorf("expected 1 Close call, got %d", scanner.closeCalls)
+	}
+}
+
+func TestScan_StreamErrorCloses(t *testing.T) {
+	s, err := stencil.Compile[contextRow]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := &trackingScanner{
+		rows:      [][]string{{"Alice"}},
+		streamErr: errors.New("stream broken"),
+	}
+	var events int
+	var got stencil.RowError
+	for _, rowErr := range stencil.Scan[contextRow](context.Background(), scanner, s) {
+		if rowErr.Code == "" {
+			continue
+		}
+		events++
+		got = rowErr
+	}
+
+	if events != 1 {
+		t.Fatalf("expected 1 stream error, got %d", events)
+	}
+	if got.Code != "stream_error" {
+		t.Errorf("expected code stream_error, got %q", got.Code)
+	}
+	if scanner.closeCalls != 1 {
+		t.Errorf("expected 1 Close call, got %d", scanner.closeCalls)
+	}
+}
+
+func TestScanCopy_ClosesScanner(t *testing.T) {
+	s, err := stencil.Compile[contextRow]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := &trackingScanner{rows: [][]string{{"Alice"}, {"Bob"}}}
+	var rows int
+	for _, rowErr := range stencil.ScanCopy[contextRow](context.Background(), scanner, s) {
+		if rowErr.Code != "" {
+			t.Fatalf("unexpected row error: %+v", rowErr)
+		}
+		rows++
+	}
+
+	if rows != 2 {
+		t.Fatalf("expected 2 valid rows, got %d", rows)
+	}
+	if scanner.closeCalls != 1 {
+		t.Errorf("expected 1 Close call, got %d", scanner.closeCalls)
+	}
 }
 
 func TestScan_YieldsIndependentValues(t *testing.T) {
