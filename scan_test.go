@@ -9,6 +9,7 @@ import (
 
 	"github.com/xdvi/stencil"
 	"github.com/xdvi/stencil/drivers/csv"
+	"github.com/xdvi/stencil/memory"
 )
 
 type requiredTypedRow struct {
@@ -509,5 +510,37 @@ func TestScan_YieldsIndependentValues(t *testing.T) {
 		if rows[i].Amount != want[i] {
 			t.Errorf("row %d: expected amount %d, got %d", i, want[i], rows[i].Amount)
 		}
+	}
+}
+
+type arenaStringRow struct {
+	Name string `stencil:"col:0,required"`
+}
+
+func TestScanArena_RetainsStringsAcrossIterations(t *testing.T) {
+	s, err := stencil.Compile[arenaStringRow]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	arena := memory.NewStringArena(4096)
+	scanner := csv.NewScanner(strings.NewReader("Alice\nBob\nCharlie\n"))
+
+	var rows []arenaStringRow
+	for row, rowErr := range stencil.ScanArena[arenaStringRow](context.Background(), scanner, s, arena) {
+		if rowErr.Code != "" {
+			t.Fatalf("unexpected row error: %+v", rowErr)
+		}
+		rows = append(rows, row)
+	}
+
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(rows))
+	}
+	if rows[0].Name != "Alice" || rows[1].Name != "Bob" || rows[2].Name != "Charlie" {
+		t.Errorf("string retention mismatch: %+v", rows)
+	}
+	if arena.BytesAllocated() != int64(len("Alice")+len("Bob")+len("Charlie")) {
+		t.Errorf("expected %d bytes in arena, got %d", len("Alice")+len("Bob")+len("Charlie"), arena.BytesAllocated())
 	}
 }

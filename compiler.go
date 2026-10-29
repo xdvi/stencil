@@ -9,6 +9,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/xdvi/stencil/binder"
+	"github.com/xdvi/stencil/memory"
 	"github.com/xdvi/stencil/scalars"
 )
 
@@ -16,10 +18,23 @@ import (
 type Schema[T any] struct {
 	colBindings []FieldBinding
 	keyBindings []FieldBinding
+	keyTable    *binder.KeyTable
 	all         []FieldBinding
 	zero        T
 	required    []FieldBinding
 }
+
+// ColBindings returns positional column bindings.
+func (s *Schema[T]) ColBindings() []FieldBinding { return s.colBindings }
+
+// KeyBindings returns named key bindings.
+func (s *Schema[T]) KeyBindings() []FieldBinding { return s.keyBindings }
+
+// AllBindings returns all compiled field bindings.
+func (s *Schema[T]) AllBindings() []FieldBinding { return s.all }
+
+// RequiredBindings returns required field bindings.
+func (s *Schema[T]) RequiredBindings() []FieldBinding { return s.required }
 
 // Compile inspects struct tags once at startup and compiles memory offsets and typed injectors.
 func Compile[T any]() (*Schema[T], error) {
@@ -29,13 +44,7 @@ func Compile[T any]() (*Schema[T], error) {
 		return nil, fmt.Errorf("stencil: schema requires a struct type")
 	}
 
-	var cols []FieldBinding
-	var keys []FieldBinding
 	var all []FieldBinding
-	var reqs []FieldBinding
-	colOwners := make(map[int]string, t.NumField())
-	keyOwners := make(map[string]string, t.NumField())
-
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
 		tag := field.Tag.Get("stencil")
@@ -47,14 +56,30 @@ func Compile[T any]() (*Schema[T], error) {
 		if err != nil {
 			return nil, fmt.Errorf("stencil: field %s: %w", field.Name, err)
 		}
+		all = append(all, binding)
+	}
 
+	return NewSchemaFromBindings[T](all)
+}
+
+// NewSchemaFromBindings constructs a Schema from an explicit list of field bindings.
+func NewSchemaFromBindings[T any](bindings []FieldBinding) (*Schema[T], error) {
+	var zero T
+	var cols []FieldBinding
+	var keys []FieldBinding
+	var all []FieldBinding
+	var reqs []FieldBinding
+	colOwners := make(map[int]string, len(bindings))
+	keyOwners := make(map[string]string, len(bindings))
+
+	for _, binding := range bindings {
 		all = append(all, binding)
 
 		if binding.ColIndex >= 0 {
 			if owner, ok := colOwners[binding.ColIndex]; ok {
-				return nil, fmt.Errorf("stencil: field %s: duplicate col:%d (already used by %s)", field.Name, binding.ColIndex, owner)
+				return nil, fmt.Errorf("stencil: field %s: duplicate col:%d (already used by %s)", binding.Name, binding.ColIndex, owner)
 			}
-			colOwners[binding.ColIndex] = field.Name
+			colOwners[binding.ColIndex] = binding.Name
 			for len(cols) <= binding.ColIndex {
 				cols = append(cols, FieldBinding{ColIndex: -1})
 			}
@@ -62,9 +87,9 @@ func Compile[T any]() (*Schema[T], error) {
 		}
 		if len(binding.KeyBytes) > 0 {
 			if owner, ok := keyOwners[binding.KeyName]; ok {
-				return nil, fmt.Errorf("stencil: field %s: duplicate key %q (already used by %s)", field.Name, binding.KeyName, owner)
+				return nil, fmt.Errorf("stencil: field %s: duplicate key %q (already used by %s)", binding.Name, binding.KeyName, owner)
 			}
-			keyOwners[binding.KeyName] = field.Name
+			keyOwners[binding.KeyName] = binding.Name
 			keys = append(keys, binding)
 		}
 		if binding.Required {
@@ -72,9 +97,22 @@ func Compile[T any]() (*Schema[T], error) {
 		}
 	}
 
+	var keyEntries []binder.KeyEntry
+	for i, kb := range keys {
+		keyEntries = append(keyEntries, binder.KeyEntry{
+			Key:      kb.KeyBytes,
+			FieldIdx: i,
+		})
+	}
+	kt, err := binder.NewKeyTable(keyEntries)
+	if err != nil {
+		return nil, fmt.Errorf("stencil: failed to compile key table: %w", err)
+	}
+
 	return &Schema[T]{
 		colBindings: cols,
 		keyBindings: keys,
+		keyTable:    kt,
 		all:         all,
 		zero:        zero,
 		required:    reqs,
@@ -131,10 +169,11 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 
 	offset := field.Offset
 	name := field.Name
-	var injector fieldInjector
-	var extractor fieldExtractor
+	var injector FieldInjector
+	var extractor FieldExtractor
 	var isZero func(base unsafe.Pointer) bool
 	var detach func(base unsafe.Pointer)
+	var detachArena func(base unsafe.Pointer, arena *memory.StringArena)
 
 	switch {
 	case field.Type == reflect.TypeOf(""):
@@ -159,6 +198,12 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 		detach = func(base unsafe.Pointer) {
 			ptr := (*string)(unsafe.Add(base, offset))
 			*ptr = strings.Clone(*ptr)
+		}
+		detachArena = func(base unsafe.Pointer, arena *memory.StringArena) {
+			ptr := (*string)(unsafe.Add(base, offset))
+			if len(*ptr) > 0 && arena != nil {
+				*ptr = arena.AllocString(*ptr)
+			}
 		}
 	case field.Type == reflect.TypeOf(int64(0)):
 		if isISO8601 {
@@ -187,6 +232,7 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 			return *(*int64)(unsafe.Add(base, offset)) == 0
 		}
 		detach = func(base unsafe.Pointer) {}
+		detachArena = func(base unsafe.Pointer, arena *memory.StringArena) {}
 	case field.Type == reflect.TypeOf(time.Time{}):
 		if isCurrency {
 			return FieldBinding{}, fmt.Errorf("currency requires an int64 field")
@@ -214,21 +260,23 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 			return (*(*time.Time)(unsafe.Add(base, offset))).IsZero()
 		}
 		detach = func(base unsafe.Pointer) {}
+		detachArena = func(base unsafe.Pointer, arena *memory.StringArena) {}
 	default:
 		return FieldBinding{}, fmt.Errorf("unsupported type %s", field.Type)
 	}
 
 	return FieldBinding{
-		ColIndex: colIdx,
-		KeyName:  keyName,
-		KeyBytes: []byte(keyName),
-		Required: required,
-		Name:     name,
-		Offset:   offset,
-		Inject:   injector,
-		Extract:  extractor,
-		IsZero:   isZero,
-		Detach:   detach,
+		ColIndex:    colIdx,
+		KeyName:     keyName,
+		KeyBytes:    []byte(keyName),
+		Required:    required,
+		Name:        name,
+		Offset:      offset,
+		Inject:      injector,
+		Extract:     extractor,
+		IsZero:      isZero,
+		Detach:      detach,
+		DetachArena: detachArena,
 	}, nil
 }
 
@@ -263,10 +311,16 @@ func (s *Schema[T]) SetField(target *T, row int, col int, key []byte, val []byte
 		}
 	}
 	if len(key) > 0 {
-		for i := range s.keyBindings {
-			b := &s.keyBindings[i]
-			if bytes.Equal(b.KeyBytes, key) {
-				return b.Inject(base, row, val, errOut)
+		if s.keyTable != nil {
+			if idx := s.keyTable.Lookup(key); idx >= 0 && idx < len(s.keyBindings) {
+				return s.keyBindings[idx].Inject(base, row, val, errOut)
+			}
+		} else {
+			for i := range s.keyBindings {
+				b := &s.keyBindings[i]
+				if bytes.Equal(b.KeyBytes, key) {
+					return b.Inject(base, row, val, errOut)
+				}
 			}
 		}
 	}

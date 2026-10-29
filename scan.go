@@ -5,6 +5,8 @@ import (
 	"io"
 	"iter"
 	"unsafe"
+
+	"github.com/xdvi/stencil/memory"
 )
 
 // Scan decodes records from scanner using pre-compiled schema s in a zero-alloc streaming loop.
@@ -17,7 +19,7 @@ import (
 // on early break, field error, stream error, and context cancellation. The caller
 // must not close the scanner separately.
 func Scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T]) iter.Seq2[T, RowError] {
-	return scan(ctx, scanner, s, false)
+	return scan(ctx, scanner, s, false, nil)
 }
 
 // ScanCopy decodes records like Scan but yields deep-copied rows.
@@ -30,10 +32,17 @@ func Scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T]) iter.Seq
 // on early break, field error, stream error, and context cancellation. The caller
 // must not close the scanner separately.
 func ScanCopy[T any](ctx context.Context, scanner RowScanner, s *Schema[T]) iter.Seq2[T, RowError] {
-	return scan(ctx, scanner, s, true)
+	return scan(ctx, scanner, s, true, nil)
 }
 
-func scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T], copyRows bool) iter.Seq2[T, RowError] {
+// ScanArena decodes records like Scan, copying string fields into the provided StringArena.
+// This allows retaining batches of rows with zero GC fragmentation and amortized zero
+// allocations when arena.Reset() is called between batches.
+func ScanArena[T any](ctx context.Context, scanner RowScanner, s *Schema[T], arena *memory.StringArena) iter.Seq2[T, RowError] {
+	return scan(ctx, scanner, s, false, arena)
+}
+
+func scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T], copyRows bool, arena *memory.StringArena) iter.Seq2[T, RowError] {
 	return func(yield func(T, RowError) bool) {
 		var item T
 		var zero T
@@ -96,6 +105,8 @@ func scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T], copyRows
 
 			if copyRows {
 				s.detachAll(&item)
+			} else if arena != nil {
+				s.detachAllToArena(&item, arena)
 			}
 
 			if !yield(item, RowError{}) {
@@ -116,6 +127,17 @@ func scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T], copyRows
 func (s *Schema[T]) detachAll(target *T) {
 	base := unsafe.Pointer(target)
 	for i := range s.all {
-		s.all[i].Detach(base)
+		if s.all[i].Detach != nil {
+			s.all[i].Detach(base)
+		}
+	}
+}
+
+func (s *Schema[T]) detachAllToArena(target *T, arena *memory.StringArena) {
+	base := unsafe.Pointer(target)
+	for i := range s.all {
+		if s.all[i].DetachArena != nil {
+			s.all[i].DetachArena(base, arena)
+		}
 	}
 }
