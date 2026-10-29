@@ -96,7 +96,7 @@ func (s *JSONScanner) ScanFields(yield stencil.FieldVisitor) error {
 	return err
 }
 
-// Err returns the first non-EOF error encountered.
+// Err returns the non-EOF error that stopped the scanner, if any.
 func (s *JSONScanner) Err() error {
 	return s.err
 }

@@ -17,7 +17,7 @@ High-performance, zero-allocation streaming tabular data micro-framework for Go.
   - **ISO 8601 / RFC 3339**: 24ns zero-alloc parser with calendar-accurate month/leap-year validation.
   - **ISO 4217**: Monetary amounts parsed directly to `int64` minor units (cents) with overflow guards (`float64` strictly forbidden).
   - **RFC 9457**: Row-level errors emit standard `application/problem+json` documents.
-- **Native Go 1.23 Iterators**: Clean pull-based streaming using `iter.Seq2[*T, RowError]`.
+- **Native Go 1.23 Iterators**: Clean pull-based streaming using `iter.Seq2[T, RowError]`.
 
 ---
 
@@ -102,6 +102,8 @@ func main() {
     }
 }
 ```
+
+`Scan` yields each record by value and is the zero-allocation path: the record and its strings are only valid until the next iteration. If you need to retain rows, use `stencil.ScanCopy`, which clones string fields before yielding.
 
 ---
 

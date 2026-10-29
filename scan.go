@@ -18,8 +18,8 @@ func Scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T]) iter.Seq
 // ScanCopy decodes records like Scan but yields deep-copied rows.
 //
 // String fields are cloned before each yield, so the yielded record is safe to
-// retain after the loop. time.Time values contain no references and need no copy.
-// Use Scan when records are consumed in place.
+// retain after the loop. time.Time values point only to immutable location data
+// and need no additional copy. Use Scan when records are consumed in place.
 func ScanCopy[T any](ctx context.Context, scanner RowScanner, s *Schema[T]) iter.Seq2[T, RowError] {
 	return scan(ctx, scanner, s, true)
 }
