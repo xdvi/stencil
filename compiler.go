@@ -33,6 +33,8 @@ func Compile[T any]() (*Schema[T], error) {
 	var keys []FieldBinding
 	var all []FieldBinding
 	var reqs []FieldBinding
+	colOwners := make(map[int]string, t.NumField())
+	keyOwners := make(map[string]string, t.NumField())
 
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
@@ -43,18 +45,26 @@ func Compile[T any]() (*Schema[T], error) {
 
 		binding, err := parseFieldTag(field, tag)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("stencil: field %s: %w", field.Name, err)
 		}
 
 		all = append(all, binding)
 
 		if binding.ColIndex >= 0 {
+			if owner, ok := colOwners[binding.ColIndex]; ok {
+				return nil, fmt.Errorf("stencil: field %s: duplicate col:%d (already used by %s)", field.Name, binding.ColIndex, owner)
+			}
+			colOwners[binding.ColIndex] = field.Name
 			for len(cols) <= binding.ColIndex {
 				cols = append(cols, FieldBinding{ColIndex: -1})
 			}
 			cols[binding.ColIndex] = binding
 		}
 		if len(binding.KeyBytes) > 0 {
+			if owner, ok := keyOwners[binding.KeyName]; ok {
+				return nil, fmt.Errorf("stencil: field %s: duplicate key %q (already used by %s)", field.Name, binding.KeyName, owner)
+			}
+			keyOwners[binding.KeyName] = field.Name
 			keys = append(keys, binding)
 		}
 		if binding.Required {
@@ -72,6 +82,10 @@ func Compile[T any]() (*Schema[T], error) {
 }
 
 func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) {
+	if field.PkgPath != "" {
+		return FieldBinding{}, fmt.Errorf("tag on unexported field")
+	}
+
 	parts := strings.Split(tag, ",")
 	colIdx := -1
 	var keyName string
@@ -80,21 +94,39 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		switch {
+		case p == "":
+			return FieldBinding{}, fmt.Errorf("empty tag token")
 		case strings.HasPrefix(p, "col:"):
-			idx, err := strconv.Atoi(strings.TrimPrefix(p, "col:"))
-			if err != nil || idx < 0 {
-				return FieldBinding{}, fmt.Errorf("invalid col index in %q", tag)
+			if colIdx >= 0 {
+				return FieldBinding{}, fmt.Errorf("duplicate col:%d", colIdx)
+			}
+			idx, err := parseColIndex(strings.TrimPrefix(p, "col:"))
+			if err != nil {
+				return FieldBinding{}, err
 			}
 			colIdx = idx
 		case strings.HasPrefix(p, "key:"):
-			keyName = strings.TrimPrefix(p, "key:")
+			if keyName != "" {
+				return FieldBinding{}, fmt.Errorf("duplicate key %q", keyName)
+			}
+			name := strings.TrimPrefix(p, "key:")
+			if name == "" {
+				return FieldBinding{}, fmt.Errorf("empty key name")
+			}
+			keyName = name
 		case p == "required":
 			required = true
 		case p == "currency":
 			isCurrency = true
 		case p == "iso8601":
 			isISO8601 = true
+		default:
+			return FieldBinding{}, fmt.Errorf("unknown tag token %q", p)
 		}
+	}
+
+	if colIdx < 0 && keyName == "" {
+		return FieldBinding{}, fmt.Errorf("tag must declare col or key")
 	}
 
 	offset := field.Offset
@@ -106,6 +138,12 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 
 	switch {
 	case field.Type == reflect.TypeOf(""):
+		if isCurrency {
+			return FieldBinding{}, fmt.Errorf("currency requires an int64 field")
+		}
+		if isISO8601 {
+			return FieldBinding{}, fmt.Errorf("iso8601 requires a time.Time field")
+		}
 		injector = func(base unsafe.Pointer, row int, val []byte, errOut *RowError) bool {
 			ptr := (*string)(unsafe.Add(base, offset))
 			*ptr = unsafe.String(unsafe.SliceData(val), len(val))
@@ -122,7 +160,13 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 			ptr := (*string)(unsafe.Add(base, offset))
 			*ptr = strings.Clone(*ptr)
 		}
-	case field.Type == reflect.TypeOf(int64(0)) && isCurrency:
+	case field.Type == reflect.TypeOf(int64(0)):
+		if isISO8601 {
+			return FieldBinding{}, fmt.Errorf("iso8601 requires a time.Time field")
+		}
+		if !isCurrency {
+			return FieldBinding{}, fmt.Errorf("int64 requires currency")
+		}
 		injector = func(base unsafe.Pointer, row int, val []byte, errOut *RowError) bool {
 			if len(val) == 0 {
 				return true
@@ -143,7 +187,13 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 			return *(*int64)(unsafe.Add(base, offset)) == 0
 		}
 		detach = func(base unsafe.Pointer) {}
-	case field.Type == reflect.TypeOf(time.Time{}) && isISO8601:
+	case field.Type == reflect.TypeOf(time.Time{}):
+		if isCurrency {
+			return FieldBinding{}, fmt.Errorf("currency requires an int64 field")
+		}
+		if !isISO8601 {
+			return FieldBinding{}, fmt.Errorf("time.Time requires iso8601")
+		}
 		injector = func(base unsafe.Pointer, row int, val []byte, errOut *RowError) bool {
 			if len(val) == 0 {
 				return true
@@ -165,7 +215,7 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 		}
 		detach = func(base unsafe.Pointer) {}
 	default:
-		return FieldBinding{}, fmt.Errorf("stencil: unsupported type %s for field %s", field.Type, field.Name)
+		return FieldBinding{}, fmt.Errorf("unsupported type %s", field.Type)
 	}
 
 	return FieldBinding{
@@ -180,6 +230,22 @@ func parseFieldTag(field reflect.StructField, tag string) (FieldBinding, error) 
 		IsZero:   isZero,
 		Detach:   detach,
 	}, nil
+}
+
+func parseColIndex(s string) (int, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty col index")
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, fmt.Errorf("invalid col index %q", s)
+		}
+	}
+	idx, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid col index %q", s)
+	}
+	return idx, nil
 }
 
 // ResetAndBind zeroes out the target struct to prevent data bleed across iterations.
