@@ -51,17 +51,22 @@ func (s *XMLScanner) Next() bool {
 
 // ScanFields decodes child tags of the current element into key-value pairs.
 func (s *XMLScanner) ScanFields(yield stencil.FieldVisitor) error {
+	if s.err != nil {
+		return s.err
+	}
 	for {
 		tok, err := s.dec.Token()
 		if err != nil {
-			return parseFailure(err)
+			s.err = parseFailure(err)
+			return s.err
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
 			key := t.Name.Local
 			var textVal string
 			if err := s.dec.DecodeElement(&textVal, &t); err != nil {
-				return parseFailure(err)
+				s.err = parseFailure(err)
+				return s.err
 			}
 			if !yield(-1, []byte(key), []byte(textVal)) {
 				return nil

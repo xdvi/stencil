@@ -2,6 +2,7 @@ package json_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -259,8 +260,11 @@ func TestJSON_Driver_NestedValuesAreRejected(t *testing.T) {
 			if !strings.Contains(scanner.Err().Error(), "nested") {
 				t.Errorf("expected error to mention nested, got %v", scanner.Err())
 			}
-			if len(events) != 1 || events[0].Code != "scanner_error" {
-				t.Fatalf("expected one scanner_error event, got %+v", events)
+			if len(events) != 1 || events[0].Code != "parse_error" {
+				t.Fatalf("expected one parse_error event, got %+v", events)
+			}
+			if pd := events[0].ProblemDetails(); pd.Status != 400 {
+				t.Errorf("expected status 400, got %d", pd.Status)
 			}
 		})
 	}
@@ -359,6 +363,51 @@ func TestJSON_Driver_ScanFieldsMisuseDoesNotPoisonErr(t *testing.T) {
 	if scanner.Err() != nil {
 		t.Fatalf("misuse after the end must not poison Err(), got %v", scanner.Err())
 	}
+}
+
+func TestJSON_Driver_ReadFailureIsStreamError(t *testing.T) {
+	s, err := stencil.Compile[UserJSON]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	source := &failingReader{data: `[`, err: errors.New("disk read failure")}
+	scanner := json.NewScanner(source)
+
+	var events []stencil.RowError
+	for _, rowErr := range stencil.Scan[UserJSON](context.Background(), scanner, s) {
+		if rowErr.Code != "" {
+			events = append(events, rowErr)
+		}
+	}
+
+	if scanner.Err() == nil {
+		t.Fatal("expected scanner.Err() to surface the read failure")
+	}
+	if len(events) != 1 || events[0].Code != "stream_error" {
+		t.Fatalf("expected one stream_error event, got %+v", events)
+	}
+	if pd := events[0].ProblemDetails(); pd.Status != 500 {
+		t.Errorf("expected status 500, got %d", pd.Status)
+	}
+}
+
+type failingReader struct {
+	data string
+	err  error
+	done bool
+}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if !r.done && len(r.data) > 0 {
+		n := copy(p, r.data)
+		r.data = r.data[n:]
+		if len(r.data) == 0 {
+			r.done = true
+		}
+		return n, nil
+	}
+	return 0, r.err
 }
 
 func TestJSON_Driver_EmptyInputIsCleanEOF(t *testing.T) {

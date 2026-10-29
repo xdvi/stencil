@@ -69,7 +69,7 @@ func scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T], copyRows
 			err := scanner.ScanFields(visit)
 
 			if err != nil {
-				code := "scanner_error"
+				code := "stream_error"
 				if isMalformedInput(err) {
 					code = "parse_error"
 				}

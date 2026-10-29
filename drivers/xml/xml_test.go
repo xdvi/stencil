@@ -74,6 +74,9 @@ func TestXML_Driver_MalformedDocumentIsParseError(t *testing.T) {
 	if scanner.Err() == nil {
 		t.Fatal("expected scanner.Err() to be non-nil for malformed XML")
 	}
+	if scanner.Next() {
+		t.Error("expected Next to stay false after a parse failure")
+	}
 	if valid != 1 {
 		t.Errorf("expected the complete item before EOF to decode, got %d", valid)
 	}
@@ -103,6 +106,9 @@ func TestXML_Driver_TruncatedDocumentIsParseError(t *testing.T) {
 		}
 	}
 
+	if scanner.Err() == nil {
+		t.Fatal("expected scanner.Err() to be non-nil for truncated XML")
+	}
 	if len(events) != 1 || events[0].Code != "parse_error" {
 		t.Fatalf("expected one parse_error event, got %+v", events)
 	}

@@ -288,22 +288,26 @@ func TestCSVScanner_MalformedTrailingQuote(t *testing.T) {
 
 func TestCSVScanner_MalformedInputIsParseError(t *testing.T) {
 	cases := []struct {
-		name string
-		data string
-		opts []csv.Option
+		name    string
+		data    string
+		opts    []csv.Option
+		wantErr error
 	}{
 		{
-			name: "unterminated quote",
-			data: "Alice,\"oops\n",
+			name:    "unterminated quote",
+			data:    "Alice,\"oops\n",
+			wantErr: csv.ErrUnterminatedQuote,
 		},
 		{
-			name: "stray bytes after quote",
-			data: "Alice,\"x\"y\n",
+			name:    "stray bytes after quote",
+			data:    "Alice,\"x\"y\n",
+			wantErr: csv.ErrUnterminatedQuote,
 		},
 		{
-			name: "record too large",
-			data: "Alice,$1.00\n",
-			opts: []csv.Option{csv.WithMaxRecordBytes(8)},
+			name:    "record too large",
+			data:    "Alice,$1.00\n",
+			opts:    []csv.Option{csv.WithMaxRecordBytes(8)},
+			wantErr: csv.ErrRecordTooLarge,
 		},
 	}
 
@@ -333,6 +337,9 @@ func TestCSVScanner_MalformedInputIsParseError(t *testing.T) {
 			}
 			if scanner.Err() == nil {
 				t.Error("expected scanner.Err() to keep the cause")
+			}
+			if !errors.Is(scanner.Err(), tc.wantErr) {
+				t.Errorf("expected errors.Is to match %v, got %v", tc.wantErr, scanner.Err())
 			}
 		})
 	}

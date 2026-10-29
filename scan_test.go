@@ -402,6 +402,35 @@ func TestScan_StreamErrorCloses(t *testing.T) {
 	}
 }
 
+func TestScan_UnmarkedScanFieldsErrorIsStreamError(t *testing.T) {
+	s, err := stencil.Compile[contextRow]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := &trackingScanner{
+		rows:    [][]string{{"Alice"}},
+		scanErr: errors.New("disk read failure"),
+	}
+
+	var events []stencil.RowError
+	for _, rowErr := range stencil.Scan[contextRow](context.Background(), scanner, s) {
+		if rowErr.Code != "" {
+			events = append(events, rowErr)
+		}
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d: %+v", len(events), events)
+	}
+	if events[0].Code != "stream_error" {
+		t.Errorf("expected stream_error for a read-side failure, got %+v", events[0])
+	}
+	if pd := events[0].ProblemDetails(); pd.Status != 500 {
+		t.Errorf("expected status 500, got %d", pd.Status)
+	}
+}
+
 func TestScan_MarkedStreamErrorIsParseError(t *testing.T) {
 	s, err := stencil.Compile[contextRow]()
 	if err != nil {

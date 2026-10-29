@@ -136,7 +136,7 @@ func decodeValue(key string, raw json.RawMessage) ([]byte, error) {
 
 	switch raw[0] {
 	case '{', '[':
-		return nil, fmt.Errorf("json: nested object or array value for key %q is not supported", key)
+		return nil, stencil.MarkMalformedInput(fmt.Errorf("json: nested object or array value for key %q is not supported", key))
 	case '"':
 		var str string
 		if err := json.Unmarshal(raw, &str); err != nil {
