@@ -69,7 +69,11 @@ func scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T], copyRows
 			err := scanner.ScanFields(visit)
 
 			if err != nil {
-				yield(zero, RowError{Row: rowNum, Code: "scanner_error", Message: err.Error()})
+				code := "scanner_error"
+				if isMalformedInput(err) {
+					code = "parse_error"
+				}
+				yield(zero, RowError{Row: rowNum, Code: code, Message: err.Error()})
 				return
 			}
 
@@ -100,7 +104,11 @@ func scan[T any](ctx context.Context, scanner RowScanner, s *Schema[T], copyRows
 		}
 
 		if err := scanner.Err(); err != nil {
-			yield(zero, RowError{Row: rowNum, Code: "stream_error", Message: err.Error()})
+			code := "stream_error"
+			if isMalformedInput(err) {
+				code = "parse_error"
+			}
+			yield(zero, RowError{Row: rowNum, Code: code, Message: err.Error()})
 		}
 	}
 }

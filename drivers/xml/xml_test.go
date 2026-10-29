@@ -53,6 +53,64 @@ func TestXML_Driver_EmptyItemTagFailsFast(t *testing.T) {
 	}
 }
 
+func TestXML_Driver_MalformedDocumentIsParseError(t *testing.T) {
+	s, err := stencil.Compile[ItemXML]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := xml.NewScanner(strings.NewReader(`<catalog><item><sku>SKU-A</sku></item>`), "item")
+
+	var events []stencil.RowError
+	valid := 0
+	for _, rowErr := range stencil.Scan[ItemXML](context.Background(), scanner, s) {
+		if rowErr.Code == "" {
+			valid++
+			continue
+		}
+		events = append(events, rowErr)
+	}
+
+	if scanner.Err() == nil {
+		t.Fatal("expected scanner.Err() to be non-nil for malformed XML")
+	}
+	if valid != 1 {
+		t.Errorf("expected the complete item before EOF to decode, got %d", valid)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d: %+v", len(events), events)
+	}
+	if events[0].Code != "parse_error" {
+		t.Errorf("expected parse_error, got %+v", events[0])
+	}
+	if pd := events[0].ProblemDetails(); pd.Status != 400 {
+		t.Errorf("expected status 400, got %d", pd.Status)
+	}
+}
+
+func TestXML_Driver_TruncatedDocumentIsParseError(t *testing.T) {
+	s, err := stencil.Compile[ItemXML]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := xml.NewScanner(strings.NewReader(`<catalog><item><sku>SKU-A`), "item")
+
+	var events []stencil.RowError
+	for _, rowErr := range stencil.Scan[ItemXML](context.Background(), scanner, s) {
+		if rowErr.Code != "" {
+			events = append(events, rowErr)
+		}
+	}
+
+	if len(events) != 1 || events[0].Code != "parse_error" {
+		t.Fatalf("expected one parse_error event, got %+v", events)
+	}
+	if pd := events[0].ProblemDetails(); pd.Status != 400 {
+		t.Errorf("expected status 400, got %d", pd.Status)
+	}
+}
+
 func TestXML_Driver_EmptyItemTagReportsStreamError(t *testing.T) {
 	s, err := stencil.Compile[ItemXML]()
 	if err != nil {

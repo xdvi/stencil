@@ -1,9 +1,42 @@
 package stencil
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// MalformedInputError marks an error as caused by malformed input supplied by
+// the caller, as opposed to a read-side failure in the underlying stream.
+type MalformedInputError interface {
+	error
+	malformedInput()
+}
+
+type malformedInputError struct{ err error }
+
+func (e malformedInputError) Error() string   { return e.err.Error() }
+func (e malformedInputError) Unwrap() error   { return e.err }
+func (e malformedInputError) malformedInput() {}
+
+// MarkMalformedInput tags err as caller-caused malformed input. Scan reports
+// such scanner failures as parse_error instead of stream_error. A nil error and
+// an already marked error are returned unchanged.
+func MarkMalformedInput(err error) error {
+	if err == nil {
+		return nil
+	}
+	var marked MalformedInputError
+	if errors.As(err, &marked) {
+		return err
+	}
+	return malformedInputError{err: err}
+}
+
+func isMalformedInput(err error) bool {
+	var marked MalformedInputError
+	return errors.As(err, &marked)
+}
 
 // RowError represents an issue encountered while parsing or validating a row.
 type RowError struct {
@@ -54,6 +87,9 @@ func (e RowError) problemType() (typ, title string, status int, detail string) {
 	case "scanner_error":
 		return "urn:stencil:error:scanner", "Malformed Input", 400,
 			fmt.Sprintf("Malformed input at row %d column %s", e.Row, e.Col)
+	case "parse_error":
+		return "urn:stencil:error:parse", "Malformed Input", 400,
+			fmt.Sprintf("Malformed input at row %d: %s", e.Row, e.Message)
 	case "stream_error":
 		return "urn:stencil:error:stream", "Stream Failure", 500,
 			fmt.Sprintf("Stream failure at row %d", e.Row)

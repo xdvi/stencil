@@ -78,6 +78,9 @@ func NewScanner(r io.Reader, opts ...Option) *CSVScanner {
 		firstRecord:    true,
 	}
 	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
 		opt(s)
 	}
 	return s
@@ -111,7 +114,7 @@ func (s *CSVScanner) Next() bool {
 
 		cells, ok := splitCSVLineInPlace(record, s.delimiter, s.byteCells[:0])
 		if !ok {
-			s.err = ErrUnterminatedQuote
+			s.err = stencil.MarkMalformedInput(ErrUnterminatedQuote)
 			return false
 		}
 		s.byteCells = cells
@@ -143,7 +146,7 @@ func (s *CSVScanner) readRecord() bool {
 	for {
 		chunk, readErr := s.reader.ReadSlice('\n')
 		if s.maxRecordBytes > 0 && len(s.lineBuf)+len(chunk) > s.maxRecordBytes {
-			s.err = ErrRecordTooLarge
+			s.err = stencil.MarkMalformedInput(ErrRecordTooLarge)
 			return false
 		}
 		s.lineBuf = append(s.lineBuf, chunk...)
@@ -151,7 +154,7 @@ func (s *CSVScanner) readRecord() bool {
 		var done bool
 		state, done = advanceRecordState(state, s.delimiter, chunk)
 		if state == stateMalformed {
-			s.err = ErrUnterminatedQuote
+			s.err = stencil.MarkMalformedInput(ErrUnterminatedQuote)
 			return false
 		}
 		if done {
@@ -165,7 +168,7 @@ func (s *CSVScanner) readRecord() bool {
 				return false
 			}
 			if state == stateQuoted {
-				s.err = ErrUnterminatedQuote
+				s.err = stencil.MarkMalformedInput(ErrUnterminatedQuote)
 				return false
 			}
 			return true

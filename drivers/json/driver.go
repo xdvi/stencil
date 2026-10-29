@@ -3,6 +3,7 @@ package json
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -33,13 +34,13 @@ func (s *JSONScanner) Next() bool {
 		tok, err := s.dec.Token()
 		if err != nil {
 			if err != io.EOF {
-				s.err = err
+				s.err = parseFailure(err)
 			}
 			s.done = true
 			return false
 		}
 		if delim, ok := tok.(json.Delim); !ok || delim != '[' {
-			s.err = fmt.Errorf("json: expected '[' at start of stream, got %s", describeToken(tok))
+			s.err = stencil.MarkMalformedInput(fmt.Errorf("json: expected '[' at start of stream, got %s", describeToken(tok)))
 			s.done = true
 			return false
 		}
@@ -49,7 +50,7 @@ func (s *JSONScanner) Next() bool {
 	if !s.dec.More() {
 		s.done = true
 		if _, err := s.dec.Token(); err != nil && err != io.EOF { // consume closing ']'
-			s.err = err
+			s.err = parseFailure(err)
 		}
 		return false
 	}
@@ -62,18 +63,16 @@ func (s *JSONScanner) ScanFields(yield stencil.FieldVisitor) error {
 		return s.err
 	}
 	if !s.started || s.done {
-		err := fmt.Errorf("json: ScanFields called before Next or after the stream ended")
-		s.err = err
-		return err
+		return fmt.Errorf("json: ScanFields called before Next or after the stream ended")
 	}
 
 	tok, err := s.dec.Token()
 	if err != nil {
-		s.err = err
-		return err
+		s.err = parseFailure(err)
+		return s.err
 	}
 	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
-		err = fmt.Errorf("expected '{' at start of object, got %v", tok)
+		err = stencil.MarkMalformedInput(fmt.Errorf("expected '{' at start of object, got %v", tok))
 		s.err = err
 		return err
 	}
@@ -82,20 +81,20 @@ func (s *JSONScanner) ScanFields(yield stencil.FieldVisitor) error {
 	for s.dec.More() {
 		keyTok, err := s.dec.Token()
 		if err != nil {
-			s.err = err
-			return err
+			s.err = parseFailure(err)
+			return s.err
 		}
 		key, ok := keyTok.(string)
 		if !ok {
-			err = fmt.Errorf("expected string key, got %v", keyTok)
+			err = stencil.MarkMalformedInput(fmt.Errorf("expected string key, got %v", keyTok))
 			s.err = err
 			return err
 		}
 
 		var raw json.RawMessage
 		if err := s.dec.Decode(&raw); err != nil {
-			s.err = err
-			return err
+			s.err = parseFailure(err)
+			return s.err
 		}
 
 		// Drain the rest of the object without yielding so the decoder stays
@@ -117,9 +116,10 @@ func (s *JSONScanner) ScanFields(yield stencil.FieldVisitor) error {
 
 	_, err = s.dec.Token() // consume closing '}'
 	if err != nil {
-		s.err = err
+		s.err = parseFailure(err)
+		return s.err
 	}
-	return err
+	return nil
 }
 
 // Err returns the non-EOF error that stopped the scanner, if any.
@@ -159,4 +159,18 @@ func describeToken(tok json.Token) string {
 		return strconv.Quote(str)
 	}
 	return fmt.Sprint(tok)
+}
+
+// parseFailure tags JSON syntax and truncation errors as caller-caused input.
+// Read-side failures from the underlying reader stay unmarked.
+func parseFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return stencil.MarkMalformedInput(err)
+	}
+	return err
 }

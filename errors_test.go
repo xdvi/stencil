@@ -2,6 +2,7 @@ package stencil_test
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -51,6 +52,13 @@ func TestRowError_ProblemDetailsMapping(t *testing.T) {
 			title:  "Malformed Input",
 			status: 400,
 			detail: "Malformed input at row 3 column price",
+		},
+		{
+			code:   "parse_error",
+			typ:    "urn:stencil:error:parse",
+			title:  "Malformed Input",
+			status: 400,
+			detail: "Malformed input at row 3: boom",
 		},
 		{
 			code:   "stream_error",
@@ -122,6 +130,37 @@ func TestRowError_ProblemDetailsMapping(t *testing.T) {
 				t.Errorf("unexpected invalid param: %+v", got)
 			}
 		})
+	}
+}
+
+func TestMarkMalformedInput(t *testing.T) {
+	if got := stencil.MarkMalformedInput(nil); got != nil {
+		t.Fatalf("expected nil for nil error, got %v", got)
+	}
+
+	base := errors.New("unterminated quote")
+	marked := stencil.MarkMalformedInput(base)
+
+	if !errors.Is(marked, base) {
+		t.Fatal("expected errors.Is to reach the wrapped error")
+	}
+	if marked.Error() != base.Error() {
+		t.Errorf("message changed: got %q, want %q", marked.Error(), base.Error())
+	}
+
+	var target stencil.MalformedInputError
+	if !errors.As(marked, &target) {
+		t.Fatal("expected errors.As to match MalformedInputError")
+	}
+
+	wrapped := errors.Join(errors.New("context"), marked)
+	if !errors.As(wrapped, &target) {
+		t.Fatal("expected wrapped marker to stay discoverable")
+	}
+
+	again := stencil.MarkMalformedInput(marked)
+	if again.Error() != marked.Error() || !errors.As(again, &target) {
+		t.Fatalf("expected re-marking to be idempotent, got %v", again)
 	}
 }
 

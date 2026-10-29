@@ -402,6 +402,38 @@ func TestScan_StreamErrorCloses(t *testing.T) {
 	}
 }
 
+func TestScan_MarkedStreamErrorIsParseError(t *testing.T) {
+	s, err := stencil.Compile[contextRow]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := &trackingScanner{
+		rows:      [][]string{{"Alice"}},
+		streamErr: stencil.MarkMalformedInput(errors.New("csv: unterminated quoted field")),
+	}
+
+	var events []stencil.RowError
+	for _, rowErr := range stencil.Scan[contextRow](context.Background(), scanner, s) {
+		if rowErr.Code != "" {
+			events = append(events, rowErr)
+		}
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d: %+v", len(events), events)
+	}
+	if events[0].Code != "parse_error" {
+		t.Errorf("expected parse_error, got %+v", events[0])
+	}
+	if !strings.Contains(events[0].Message, "unterminated quoted field") {
+		t.Errorf("expected message to keep the cause, got %q", events[0].Message)
+	}
+	if pd := events[0].ProblemDetails(); pd.Status != 400 {
+		t.Errorf("expected status 400, got %d", pd.Status)
+	}
+}
+
 func TestScanCopy_ClosesScanner(t *testing.T) {
 	s, err := stencil.Compile[contextRow]()
 	if err != nil {

@@ -39,7 +39,7 @@ func (s *XMLScanner) Next() bool {
 		tok, err := s.dec.Token()
 		if err != nil {
 			if err != io.EOF {
-				s.err = err
+				s.err = parseFailure(err)
 			}
 			return false
 		}
@@ -54,14 +54,14 @@ func (s *XMLScanner) ScanFields(yield stencil.FieldVisitor) error {
 	for {
 		tok, err := s.dec.Token()
 		if err != nil {
-			return err
+			return parseFailure(err)
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
 			key := t.Name.Local
 			var textVal string
 			if err := s.dec.DecodeElement(&textVal, &t); err != nil {
-				return err
+				return parseFailure(err)
 			}
 			if !yield(-1, []byte(key), []byte(textVal)) {
 				return nil
@@ -77,4 +77,17 @@ func (s *XMLScanner) ScanFields(yield stencil.FieldVisitor) error {
 // Err returns the first non-EOF error encountered.
 func (s *XMLScanner) Err() error {
 	return s.err
+}
+
+// parseFailure tags XML syntax errors as caller-caused input. Read-side
+// failures from the underlying reader stay unmarked.
+func parseFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	var syntaxErr *xml.SyntaxError
+	if errors.As(err, &syntaxErr) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return stencil.MarkMalformedInput(err)
+	}
+	return err
 }

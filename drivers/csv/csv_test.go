@@ -286,6 +286,106 @@ func TestCSVScanner_MalformedTrailingQuote(t *testing.T) {
 	}
 }
 
+func TestCSVScanner_MalformedInputIsParseError(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		opts []csv.Option
+	}{
+		{
+			name: "unterminated quote",
+			data: "Alice,\"oops\n",
+		},
+		{
+			name: "stray bytes after quote",
+			data: "Alice,\"x\"y\n",
+		},
+		{
+			name: "record too large",
+			data: "Alice,$1.00\n",
+			opts: []csv.Option{csv.WithMaxRecordBytes(8)},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := stencil.Compile[Account]()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			scanner := csv.NewScanner(strings.NewReader(tc.data), tc.opts...)
+			var events []stencil.RowError
+			for _, rowErr := range stencil.Scan[Account](context.Background(), scanner, s) {
+				if rowErr.Code != "" {
+					events = append(events, rowErr)
+				}
+			}
+
+			if len(events) != 1 {
+				t.Fatalf("expected 1 event, got %d: %+v", len(events), events)
+			}
+			if events[0].Code != "parse_error" {
+				t.Errorf("expected parse_error, got %+v", events[0])
+			}
+			if pd := events[0].ProblemDetails(); pd.Status != 400 {
+				t.Errorf("expected status 400, got %d", pd.Status)
+			}
+			if scanner.Err() == nil {
+				t.Error("expected scanner.Err() to keep the cause")
+			}
+		})
+	}
+}
+
+func TestCSVScanner_NilOptionIsIgnored(t *testing.T) {
+	s, err := stencil.Compile[Account]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := csv.NewScanner(strings.NewReader("Alice,$1.00\n"), nil)
+	var rows int
+	for _, rowErr := range stencil.Scan[Account](context.Background(), scanner, s) {
+		if rowErr.Code != "" {
+			t.Fatalf("unexpected row error: %+v", rowErr)
+		}
+		rows++
+	}
+	if rows != 1 {
+		t.Fatalf("expected 1 row, got %d", rows)
+	}
+}
+
+func TestCSVScanner_MaxRecordExactBoundary(t *testing.T) {
+	s, err := stencil.Compile[Account]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ok := csv.NewScanner(strings.NewReader("Alice,1"), csv.WithMaxRecordBytes(7))
+	var rows int
+	for _, rowErr := range stencil.Scan[Account](context.Background(), ok, s) {
+		if rowErr.Code != "" {
+			t.Fatalf("unexpected row error: %+v", rowErr)
+		}
+		rows++
+	}
+	if rows != 1 {
+		t.Fatalf("expected 1 row at the exact cap, got %d", rows)
+	}
+
+	over := csv.NewScanner(strings.NewReader("Alice,10"), csv.WithMaxRecordBytes(7))
+	for _, rowErr := range stencil.Scan[Account](context.Background(), over, s) {
+		if rowErr.Code != "" {
+			break
+		}
+	}
+	if !errors.Is(over.Err(), csv.ErrRecordTooLarge) {
+		t.Fatalf("expected ErrRecordTooLarge one byte over the cap, got %v", over.Err())
+	}
+}
+
 // scanEach streams data through the value-based Scan API and visits every
 // decoded row in place. The visitor must not retain strings: they alias the
 // scanner buffer and are only valid for the duration of the call.
@@ -297,10 +397,14 @@ func scanEach[T any](t *testing.T, data string, opts []csv.Option, fn func(T)) e
 	}
 	scanner := csv.NewScanner(strings.NewReader(data), opts...)
 	for item, rowErr := range stencil.Scan[T](context.Background(), scanner, s) {
-		if rowErr.Code != "" {
-			return scanner.Err()
+		if rowErr.Code == "" {
+			fn(item)
+			continue
 		}
-		fn(item)
+		if err := scanner.Err(); err != nil {
+			return err
+		}
+		return rowErr
 	}
 	return scanner.Err()
 }

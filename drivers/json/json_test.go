@@ -42,30 +42,44 @@ func TestJSON_Driver_ArrayStream(t *testing.T) {
 	}
 }
 
-func TestJSON_Driver_InvalidPayloadReportsStreamError(t *testing.T) {
-	s, err := stencil.Compile[UserJSON]()
-	if err != nil {
-		t.Fatal(err)
+func TestJSON_Driver_InvalidPayloadReportsParseError(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+	}{
+		{name: "not json", data: `not json`},
+		{name: "truncated array", data: `[{"user":"a","credits":"1.00"}`},
 	}
 
-	scanner := json.NewScanner(strings.NewReader(`not json`))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := stencil.Compile[UserJSON]()
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	var events []stencil.RowError
-	for item, rowErr := range stencil.Scan[UserJSON](context.Background(), scanner, s) {
-		if rowErr.Code == "" {
-			t.Errorf("expected zero valid records, got %+v", item)
-		}
-		events = append(events, rowErr)
-	}
+			scanner := json.NewScanner(strings.NewReader(tc.data))
 
-	if scanner.Err() == nil {
-		t.Fatal("expected scanner.Err() to be non-nil for invalid payload")
-	}
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event, got %d: %+v", len(events), events)
-	}
-	if events[0].Code != "stream_error" {
-		t.Errorf("expected stream_error event, got %+v", events[0])
+			var events []stencil.RowError
+			for _, rowErr := range stencil.Scan[UserJSON](context.Background(), scanner, s) {
+				if rowErr.Code != "" {
+					events = append(events, rowErr)
+				}
+			}
+
+			if scanner.Err() == nil {
+				t.Fatal("expected scanner.Err() to be non-nil for invalid payload")
+			}
+			if len(events) != 1 {
+				t.Fatalf("expected 1 event, got %d: %+v", len(events), events)
+			}
+			if events[0].Code != "parse_error" {
+				t.Errorf("expected parse_error event, got %+v", events[0])
+			}
+			if pd := events[0].ProblemDetails(); pd.Status != 400 {
+				t.Errorf("expected status 400, got %d", pd.Status)
+			}
+		})
 	}
 }
 
@@ -291,8 +305,11 @@ func TestJSON_Driver_NonArrayRootIsRejected(t *testing.T) {
 			if !strings.Contains(scanner.Err().Error(), "[") || !strings.Contains(scanner.Err().Error(), tc.token) {
 				t.Errorf("expected error to mention '[' and %q, got %v", tc.token, scanner.Err())
 			}
-			if len(events) != 1 || events[0].Code != "stream_error" {
-				t.Fatalf("expected one stream_error event, got %+v", events)
+			if len(events) != 1 || events[0].Code != "parse_error" {
+				t.Fatalf("expected one parse_error event, got %+v", events)
+			}
+			if pd := events[0].ProblemDetails(); pd.Status != 400 {
+				t.Errorf("expected status 400, got %d", pd.Status)
 			}
 			if scanner.Next() {
 				t.Error("expected Next to stay false after a fatal error")
@@ -315,6 +332,32 @@ func TestJSON_Driver_NextAfterArrayClose(t *testing.T) {
 	}
 	if scanner.Err() != nil {
 		t.Errorf("unexpected scanner error: %v", scanner.Err())
+	}
+}
+
+func TestJSON_Driver_ScanFieldsMisuseDoesNotPoisonErr(t *testing.T) {
+	scanner := json.NewScanner(strings.NewReader(`[{"user":"a","credits":"1.00"}]`))
+
+	if err := scanner.ScanFields(func(int, []byte, []byte) bool { return true }); err == nil {
+		t.Fatal("expected an error when ScanFields runs before Next")
+	}
+	if scanner.Err() != nil {
+		t.Fatalf("misuse must not poison Err(), got %v", scanner.Err())
+	}
+	if !scanner.Next() {
+		t.Fatalf("expected scanner to stay usable, got %v", scanner.Err())
+	}
+	if err := scanner.ScanFields(func(int, []byte, []byte) bool { return true }); err != nil {
+		t.Fatalf("unexpected field error: %v", err)
+	}
+	if scanner.Next() {
+		t.Fatal("expected the array to be exhausted")
+	}
+	if err := scanner.ScanFields(func(int, []byte, []byte) bool { return true }); err == nil {
+		t.Fatal("expected an error when ScanFields runs after the stream ended")
+	}
+	if scanner.Err() != nil {
+		t.Fatalf("misuse after the end must not poison Err(), got %v", scanner.Err())
 	}
 }
 
