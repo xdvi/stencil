@@ -3,6 +3,7 @@ package json_test
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -428,5 +429,104 @@ func TestJSON_Driver_EmptyInputIsCleanEOF(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Fatalf("expected no events for empty input, got %+v", events)
+	}
+}
+
+func BenchmarkJSONScanner_ScanRows(b *testing.B) {
+	payload := `[{"user":"alice","credits":"$50.00"},{"user":"bob","credits":"$12.50"}]`
+	s, err := stencil.Compile[UserJSON]()
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctx := context.Background()
+	r := strings.NewReader(payload)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		r.Reset(payload)
+		scanner := json.NewScanner(r)
+		for _, rowErr := range stencil.Scan[UserJSON](ctx, scanner, s) {
+			if rowErr.Code != "" {
+				b.Fatal(rowErr)
+			}
+		}
+	}
+}
+
+type repeatingJSONReader struct {
+	totalRows int
+	currRow   int
+	chunk     []byte
+	offset    int
+	started   bool
+}
+
+func newRepeatingJSONReader(rows int) *repeatingJSONReader {
+	return &repeatingJSONReader{
+		totalRows: rows,
+		chunk:     []byte(`{"user":"benchmark_user","credits":"$1,250.75"}`),
+	}
+}
+
+func (r *repeatingJSONReader) Read(p []byte) (int, error) {
+	if r.currRow >= r.totalRows {
+		if r.currRow == r.totalRows {
+			r.currRow++
+			if len(p) > 0 {
+				p[0] = ']'
+				return 1, nil
+			}
+		}
+		return 0, io.EOF
+	}
+
+	written := 0
+	if !r.started {
+		if len(p) > 0 {
+			p[0] = '['
+			written = 1
+			r.started = true
+		}
+	}
+
+	for written < len(p) && r.currRow < r.totalRows {
+		if r.currRow > 0 && r.offset == 0 {
+			p[written] = ','
+			written++
+			if written >= len(p) {
+				break
+			}
+		}
+		avail := len(r.chunk) - r.offset
+		toCopy := min(len(p)-written, avail)
+		copy(p[written:], r.chunk[r.offset:r.offset+toCopy])
+		written += toCopy
+		r.offset += toCopy
+		if r.offset >= len(r.chunk) {
+			r.offset = 0
+			r.currRow++
+		}
+	}
+	return written, nil
+}
+
+func BenchmarkJSONScanner_ZeroAllocStreaming(b *testing.B) {
+	s, err := stencil.Compile[UserJSON]()
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctx := context.Background()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		r := newRepeatingJSONReader(1000)
+		scanner := json.NewScanner(r)
+		for _, rowErr := range stencil.Scan[UserJSON](ctx, scanner, s) {
+			if rowErr.Code != "" {
+				b.Fatal(rowErr)
+			}
+		}
 	}
 }
