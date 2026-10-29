@@ -1,6 +1,9 @@
 package stencil
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // RowError represents an issue encountered while parsing or validating a row.
 type RowError struct {
@@ -13,8 +16,16 @@ type RowError struct {
 }
 
 func (e RowError) Error() string {
-	return fmt.Sprintf("row %d, col %s: %s (code=%s, expected=%s, actual=%s)",
-		e.Row, e.Col, e.Message, e.Code, e.Expected, e.Actual)
+	var b strings.Builder
+	fmt.Fprintf(&b, "row %d, col %s: %s (code=%s", e.Row, e.Col, e.Message, e.Code)
+	if e.Expected != "" {
+		fmt.Fprintf(&b, ", expected=%s", e.Expected)
+	}
+	if e.Actual != "" {
+		fmt.Fprintf(&b, ", actual=%s", e.Actual)
+	}
+	b.WriteString(")")
+	return b.String()
 }
 
 // ProblemDetails represents an RFC 9457 structured error document.
@@ -37,13 +48,32 @@ type InvalidParam struct {
 	Actual   string `json:"actual,omitempty"`
 }
 
+// problemType classifies a row error code into an RFC 9457 problem document.
+func (e RowError) problemType() (typ, title string, status int, detail string) {
+	switch e.Code {
+	case "scanner_error":
+		return "urn:stencil:error:scanner", "Malformed Input", 400,
+			fmt.Sprintf("Malformed input at row %d column %s", e.Row, e.Col)
+	case "stream_error":
+		return "urn:stencil:error:stream", "Stream Failure", 500,
+			fmt.Sprintf("Stream failure at row %d", e.Row)
+	case "canceled":
+		return "urn:stencil:error:canceled", "Request Timeout", 408,
+			fmt.Sprintf("Request canceled at row %d", e.Row)
+	default:
+		return "urn:stencil:error:validation", "Unprocessable Row Data", 422,
+			fmt.Sprintf("Validation failed at row %d column %s", e.Row, e.Col)
+	}
+}
+
 // ProblemDetails converts a RowError into an RFC 9457 format.
 func (e RowError) ProblemDetails() ProblemDetails {
+	typ, title, status, detail := e.problemType()
 	return ProblemDetails{
-		Type:   "urn:stencil:error:validation",
-		Title:  "Unprocessable Row Data",
-		Status: 422,
-		Detail: fmt.Sprintf("Validation failed at row %d column %s", e.Row, e.Col),
+		Type:   typ,
+		Title:  title,
+		Status: status,
+		Detail: detail,
 		InvalidParams: []InvalidParam{
 			{
 				Row:      e.Row,

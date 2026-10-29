@@ -2,10 +2,14 @@ package xml
 
 import (
 	"encoding/xml"
+	"errors"
 	"io"
 
 	"github.com/xdvi/stencil"
 )
+
+// ErrEmptyItemTag is returned when a scanner is created without an item tag.
+var ErrEmptyItemTag = errors.New("xml: item tag is empty")
 
 // XMLScanner streams repeated XML elements one by one without buffering the entire document into RAM.
 type XMLScanner struct {
@@ -16,14 +20,21 @@ type XMLScanner struct {
 
 // NewScanner creates a new streaming XML scanner for the given repeating element tag.
 func NewScanner(r io.Reader, itemTag string) *XMLScanner {
-	return &XMLScanner{
+	s := &XMLScanner{
 		dec:     xml.NewDecoder(r),
 		itemTag: itemTag,
 	}
+	if itemTag == "" {
+		s.err = ErrEmptyItemTag
+	}
+	return s
 }
 
 // Next locates the start element matching itemTag.
 func (s *XMLScanner) Next() bool {
+	if s.err != nil {
+		return false
+	}
 	for {
 		tok, err := s.dec.Token()
 		if err != nil {

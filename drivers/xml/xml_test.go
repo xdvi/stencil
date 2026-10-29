@@ -2,6 +2,7 @@ package xml_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -38,5 +39,40 @@ func TestXML_Driver_Scan(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("expected 2 items, got %d", count)
+	}
+}
+
+func TestXML_Driver_EmptyItemTagFailsFast(t *testing.T) {
+	scanner := xml.NewScanner(strings.NewReader("<items/>"), "")
+
+	if scanner.Next() {
+		t.Fatal("expected Next to return false for an empty item tag")
+	}
+	if !errors.Is(scanner.Err(), xml.ErrEmptyItemTag) {
+		t.Fatalf("expected ErrEmptyItemTag, got %v", scanner.Err())
+	}
+}
+
+func TestXML_Driver_EmptyItemTagReportsStreamError(t *testing.T) {
+	s, err := stencil.Compile[ItemXML]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := xml.NewScanner(strings.NewReader("<items/>"), "")
+
+	var events []stencil.RowError
+	for _, rowErr := range stencil.Scan[ItemXML](context.Background(), scanner, s) {
+		events = append(events, rowErr)
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("expected exactly 1 event, got %d: %+v", len(events), events)
+	}
+	if events[0].Code != "stream_error" {
+		t.Errorf("expected stream_error, got %+v", events[0])
+	}
+	if !strings.Contains(events[0].Message, "item tag is empty") {
+		t.Errorf("expected message to mention the empty item tag, got %q", events[0].Message)
 	}
 }
