@@ -1,9 +1,11 @@
 package json
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 
 	"github.com/xdvi/stencil"
 )
@@ -11,7 +13,8 @@ import (
 // JSONScanner tokenizes streaming JSON array objects without loading the entire payload into RAM.
 type JSONScanner struct {
 	dec     *json.Decoder
-	inArray bool
+	started bool
+	done    bool
 	err     error
 }
 
@@ -22,30 +25,48 @@ func NewScanner(r io.Reader) *JSONScanner {
 
 // Next advances to the next object in the stream.
 func (s *JSONScanner) Next() bool {
-	if !s.inArray {
+	if s.err != nil || s.done {
+		return false
+	}
+
+	if !s.started {
 		tok, err := s.dec.Token()
 		if err != nil {
 			if err != io.EOF {
 				s.err = err
 			}
+			s.done = true
 			return false
 		}
-		if delim, ok := tok.(json.Delim); ok && delim == '[' {
-			s.inArray = true
+		if delim, ok := tok.(json.Delim); !ok || delim != '[' {
+			s.err = fmt.Errorf("json: expected '[' at start of stream, got %s", describeToken(tok))
+			s.done = true
+			return false
 		}
+		s.started = true
 	}
 
-	if s.inArray && !s.dec.More() {
+	if !s.dec.More() {
+		s.done = true
 		if _, err := s.dec.Token(); err != nil && err != io.EOF { // consume closing ']'
 			s.err = err
 		}
 		return false
 	}
-	return s.dec.More()
+	return true
 }
 
 // ScanFields decodes key-value pairs of the current JSON object.
 func (s *JSONScanner) ScanFields(yield stencil.FieldVisitor) error {
+	if s.err != nil {
+		return s.err
+	}
+	if !s.started || s.done {
+		err := fmt.Errorf("json: ScanFields called before Next or after the stream ended")
+		s.err = err
+		return err
+	}
+
 	tok, err := s.dec.Token()
 	if err != nil {
 		s.err = err
@@ -83,8 +104,13 @@ func (s *JSONScanner) ScanFields(yield stencil.FieldVisitor) error {
 			continue
 		}
 
-		cleanVal := cleanJSONRaw(raw)
-		if !yield(-1, []byte(key), cleanVal) {
+		val, err := decodeValue(key, raw)
+		if err != nil {
+			s.err = err
+			return err
+		}
+
+		if !yield(-1, []byte(key), val) {
 			stopped = true
 		}
 	}
@@ -101,9 +127,36 @@ func (s *JSONScanner) Err() error {
 	return s.err
 }
 
-func cleanJSONRaw(b []byte) []byte {
-	if len(b) >= 2 && b[0] == '"' && b[len(b)-1] == '"' {
-		return b[1 : len(b)-1]
+// decodeValue maps a raw JSON value to the flat byte representation the schema expects.
+func decodeValue(key string, raw json.RawMessage) ([]byte, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil, nil
 	}
-	return b
+
+	switch raw[0] {
+	case '{', '[':
+		return nil, fmt.Errorf("json: nested object or array value for key %q is not supported", key)
+	case '"':
+		var str string
+		if err := json.Unmarshal(raw, &str); err != nil {
+			return nil, err
+		}
+		return []byte(str), nil
+	}
+
+	if bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	return raw, nil
+}
+
+func describeToken(tok json.Token) string {
+	if tok == nil {
+		return "null"
+	}
+	if str, ok := tok.(string); ok {
+		return strconv.Quote(str)
+	}
+	return fmt.Sprint(tok)
 }
